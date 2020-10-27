@@ -1,0 +1,144 @@
+SET @old_max_binlog_size= @@GLOBAL.max_binlog_size;
+SET GLOBAL max_binlog_size= 4096;
+call mtr.add_suppression("Can't init tc log");
+call mtr.add_suppression("Aborting");
+CREATE TABLE t1 (a INT PRIMARY KEY, b MEDIUMTEXT) ENGINE=Innodb;
+CREATE TABLE t2 (a INT PRIMARY KEY, b MEDIUMTEXT) ENGINE=rocksdb;
+# Case A: neither engine committed => rollback & binlog truncate
+RESET MASTER;
+FLUSH LOGS;
+connect con1,localhost,root,,;
+"List of binary logs before rotation"
+show binary logs;
+Log_name	File_size
+master-bin.000001	#
+master-bin.000002	#
+BEGIN;
+INSERT INTO t2 VALUES (1, REPEAT("x", 4100));
+INSERT INTO t1 VALUES (2, REPEAT("x", 4100));
+# Case A. neither of the engines commits
+SET DEBUG_SYNC= "commit_after_release_LOCK_log SIGNAL con1_ready WAIT_FOR _never_to_arrive";
+COMMIT;
+connection default;
+SET DEBUG_SYNC= "now WAIT_FOR con1_ready";
+"List of binary logs after rotation"
+show binary logs;
+Log_name	File_size
+master-bin.000001	#
+master-bin.000002	#
+master-bin.000003	#
+# Kill the server
+connection default;
+
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+1
+SELECT @@GLOBAL.gtid_current_pos;
+@@GLOBAL.gtid_current_pos
+0-1-1
+"List of binary logs after the tests"
+show binary logs;
+Log_name	File_size
+master-bin.000001	#
+master-bin.000002	#
+master-bin.000003	#
+master-bin.000004	#
+DELETE FROM t1;
+DELETE FROM t2;
+disconnect con1;
+connection default;
+# Case B: one engine has committed its transaction branch
+RESET MASTER;
+FLUSH LOGS;
+connect con1,localhost,root,,;
+"List of binary logs before rotation"
+show binary logs;
+Log_name	File_size
+master-bin.000001	#
+master-bin.000002	#
+BEGIN;
+INSERT INTO t2 VALUES (1, REPEAT("x", 4100));
+INSERT INTO t1 VALUES (2, REPEAT("x", 4100));
+# Case A. neither of the engines commits
+SET DEBUG_SYNC= "commit_after_run_commit_ordered SIGNAL con1_ready WAIT_FOR _never_to_arrive";
+COMMIT;
+connection default;
+SET DEBUG_SYNC= "now WAIT_FOR con1_ready";
+"List of binary logs after rotation"
+show binary logs;
+Log_name	File_size
+master-bin.000001	#
+master-bin.000002	#
+# Kill the server
+connection default;
+*** 1 row should be present in both tables; no binlog truncation.
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+1
+SELECT @@GLOBAL.gtid_current_pos;
+@@GLOBAL.gtid_current_pos
+0-1-1
+"List of binary logs after the tests"
+show binary logs;
+Log_name	File_size
+master-bin.000001	#
+master-bin.000002	#
+master-bin.000003	#
+DELETE FROM t1;
+DELETE FROM t2;
+disconnect con1;
+# Case C: both engines have committed its transaction branch
+RESET MASTER;
+FLUSH LOGS;
+connect con1,localhost,root,,;
+"List of binary logs before rotation"
+show binary logs;
+Log_name	File_size
+master-bin.000001	#
+master-bin.000002	#
+BEGIN;
+INSERT INTO t2 VALUES (1, REPEAT("x", 4100));
+INSERT INTO t1 VALUES (2, REPEAT("x", 4100));
+# Case A. neither of the engines commits
+SET DEBUG_SYNC= "commit_one_phase_2_ends SIGNAL con1_ready WAIT_FOR _never_to_arrive";
+COMMIT;
+connection default;
+SET DEBUG_SYNC= "now WAIT_FOR con1_ready";
+"List of binary logs after rotation"
+show binary logs;
+Log_name	File_size
+master-bin.000001	#
+master-bin.000002	#
+# Kill the server
+connection default;
+1 row should be present in both tables; no binlog truncation.
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+1
+SELECT @@GLOBAL.gtid_current_pos;
+@@GLOBAL.gtid_current_pos
+0-1-1
+"List of binary logs after the tests"
+show binary logs;
+Log_name	File_size
+master-bin.000001	#
+master-bin.000002	#
+master-bin.000003	#
+DELETE FROM t1;
+DELETE FROM t2;
+disconnect con1;
+# Cleanup
+DROP TABLE t1, t2;
+SELECT @@GLOBAL.gtid_binlog_state;
+@@GLOBAL.gtid_binlog_state
+0-1-4
+# End of the tests

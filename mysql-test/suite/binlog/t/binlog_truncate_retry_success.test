@@ -56,11 +56,11 @@ EOF
 --source include/wait_until_disconnected.inc
 #
 # Server restart
-# The purpose of debug_dbug's "d,skip_new_binlog_create" is to avoid binlog
-# at the end of heuristic recovery\footnote{When the simulated error occured for a real
-# user she would have to manually remove the created binlog file, if retry
-# makes sense}.
 #
+# The purpose of debug_dbug's "d,skip_new_binlog_create" is to avoid
+# binlog rotation at the end of heuristic recovery\footnote{When the
+# simulated error occured for a real user she would have to manually
+# remove the created binlog file, if retry makes sense}.
 --error 1
 --exec $MYSQLD_LAST_CMD  --tc-heuristic-recover=BINLOG_TRUNCATE --debug-dbug=d,fault_injection_opening_binlog,skip_new_binlog_create > $MYSQLTEST_VARDIR/log/mysqld.1.err 2>&1
 --source include/wait_until_disconnected.inc

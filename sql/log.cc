@@ -9975,6 +9975,12 @@ int TC_LOG_BINLOG::heuristic_binlog_rollback(HASH *xids)
                             (uchar*) &static_cast<Xid_log_event*>(ev)->xid,
                             sizeof(my_xid))) != NULL)
         {
+          DBUG_EXECUTE_IF("binlog_truncate_partial_commit",
+                          if (last_gtid_engines == 2)
+                          {
+                            DBUG_ASSERT(member->in_engine_prepare > 0);
+                            member->in_engine_prepare= 1;
+                          });
           // Possible truncate candidate validation follows as:
           // in_engine_prepare is examined and set or left to stay
           // either to/as 0 for to-commit mark, or non-zero for rollback
@@ -10076,38 +10082,34 @@ int TC_LOG_BINLOG::heuristic_binlog_rollback(HASH *xids)
         delete ev;
       ev= NULL;
     } // End While
+
     if (file >= 0)
     {
       end_io_cache(&log);
       mysql_file_close(file, MYF(MY_WME));
       file= -1;
     }
-    if (is_safe)
+    if ((error= find_next_log(&log_info, 1)))
     {
-      if ((error= find_next_log(&log_info, 1)))
+      if (error != LOG_INFO_EOF)
       {
-        if (error != LOG_INFO_EOF)
-        {
-          sql_print_error("tc-heuristic-recover: Failed to read next binary "
-                          "log during recovery.");
-          goto end;
-        }
-        else
-        {
-          error= 0; // LOG_INFO_EOF= -1 is not an error.
-          break;
-        }
-      }
-      if ((file= open_binlog(&log, log_info.log_file_name, &errmsg)) < 0)
-      {
-        error= 1;
-        sql_print_error("tc-heuristic-recover: Failed to open the binlog:%s for "
-                        "recovery. Error:%s", log_info.log_file_name, errmsg);
+        sql_print_error("tc-heuristic-recover: Failed to read next binary "
+                        "log during recovery.");
         goto end;
       }
+      else
+      {
+        error= 0; // LOG_INFO_EOF= -1 is not an error.
+        break;
+      }
     }
-    else
-      break;
+    if ((file= open_binlog(&log, log_info.log_file_name, &errmsg)) < 0)
+    {
+      error= 1;
+      sql_print_error("tc-heuristic-recover: Failed to open the binlog:%s for "
+                      "recovery. Error:%s", log_info.log_file_name, errmsg);
+      goto end;
+    }
   } //end of for(;;)
 
   /* complete with xids transactions in engines (regadless of is_safe)  */

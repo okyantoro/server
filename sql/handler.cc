@@ -1649,6 +1649,7 @@ commit_one_phase_2(THD *thd, bool all, THD_TRANS *trans, bool is_real_trans)
   {
     thd->has_waiter= false;
     thd->transaction.cleanup();
+    DEBUG_SYNC(thd, "commit_one_phase_2_ends");
   }
 
   DBUG_RETURN(error);
@@ -2085,6 +2086,17 @@ static my_bool xarecover_handlerton(THD *unused, plugin_ref plugin,
           continue;
         }
         // recovery mode
+#ifdef HAVE_REPLICATION
+        if (tc_heuristic_recover == TC_RECOVER_BINLOG_TRUNCATE)
+        {
+          if (xid_member_replace(info->commit_list, x, info->mem_root))
+          {
+            info->error= true;
+            sql_print_error("Error in memory allocation at xarecover_handlerton");
+            break;
+          }
+        } else
+#endif
         if (IF_WSREP((wsrep_emulate_bin_log &&
                       wsrep_is_wsrep_xid(info->list + i) &&
                       x <= wsrep_limit), false) ||
@@ -2105,7 +2117,7 @@ static my_bool xarecover_handlerton(THD *unused, plugin_ref plugin,
           }
 #endif
         }
-        else if (tc_heuristic_recover != TC_RECOVER_BINLOG_TRUNCATE)
+        else
         {
 #ifndef DBUG_OFF
           int rc=
@@ -2120,17 +2132,6 @@ static my_bool xarecover_handlerton(THD *unused, plugin_ref plugin,
           }
 #endif
         }
-#ifdef HAVE_REPLICATION
-        else
-        {
-          if (xid_member_replace(info->commit_list, x, info->mem_root))
-          {
-            info->error= true;
-            sql_print_error("Error in memory allocation at xarecover_handlerton");
-            break;
-          }
-        }
-#endif
       }
       if (got < info->len)
         break;

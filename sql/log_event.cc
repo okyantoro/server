@@ -7563,9 +7563,10 @@ Gtid_log_event::Gtid_log_event(const char *buf, uint event_len,
     }
   }
   /* '<' part of the assert corresponds to extra zero-padded trailing bytes, */
-  DBUG_ASSERT(buf - buf_0 <= event_len);
+  DBUG_ASSERT(static_cast<uint>(buf - buf_0) <= event_len);
   /* and the last of them is tested. */
-  DBUG_ASSERT(buf - buf_0 == event_len || buf_0[event_len - 1] == 0);
+  DBUG_ASSERT(static_cast<uint>(buf - buf_0) == event_len ||
+              buf_0[event_len - 1] == 0);
 }
 
 
@@ -7597,7 +7598,8 @@ Gtid_log_event::Gtid_log_event(THD *thd_arg, uint64 seq_no_arg,
   /* Preserve any DDL or WAITED flag in the slave's binlog. */
   if (thd_arg->rgi_slave)
     flags2|= (thd_arg->rgi_slave->gtid_ev_flags2 & (FL_DDL|FL_WAITED));
-  if ((extra_engines= (min<uint>(2, ha_count_rw_all(thd, NULL, true)) - 2) > 0))
+  /* below minus 1 counts one recoverable default engine which binlog is not */
+  if ((extra_engines= (min<uint>(2, ha_count_rw_all(thd, NULL, true)) - 1) > 0))
     flags_extra|= FL_EXTRA_MULTI_ENGINE;
 }
 
@@ -7649,12 +7651,17 @@ Gtid_log_event::write()
   buf[12]= flags2;
   if (flags2 & FL_GROUP_COMMIT_ID)
   {
-    int8store(buf+13, commit_id);
+    int8store(buf + write_len, commit_id);
     write_len= GTID_HEADER_LEN + 2;
   }
-  if (flags & FL_EXTRA_MULTI_ENGINE)
+  if (flags_extra > 0)
   {
-    int4store(buf, extra_engines);
+    buf[write_len]= flags_extra;
+    write_len++;
+  }
+  if (flags_extra & FL_EXTRA_MULTI_ENGINE)
+  {
+    int4store(buf + write_len, extra_engines);
     write_len += 4;
   }
 
