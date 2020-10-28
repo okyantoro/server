@@ -6,22 +6,20 @@
 #
 # Steps:
 #    0 - Create two tables in innodb and rocksdb engines,
-#        Set max_binlog_size= 4096.
 #
 # In loop for A,B,C cases (below) do 1-5:
 #    1 - execute FLUSH LOGS command to generate a new binary log.
 #        Start a transaction inserting rows of sufficient sizes
-#        so binary log gets rotated at commit.
+#        so binary log gets rotated at commit
 #    2 - Using debug simulation make the server crash at a point where
 #        the transaction is written to binary log *and* either of
 #        A. neither of them commits
 #        B. only one commits
 #        C. both commit
-#    3 - At the time of crash three binary logs will be there
-#        master-bin.0000001, master-bin.000002 and master-bin.000003.
+#    3 - print the # of binlog files before the transaction starts and after its
+#        commit is submitted
 #    4 - Restart server with --tc-heuristic-recover=BINLOG_TRUNCATE
-#    5 - Since the prepared DML in master-bin.000002 the binary log will be
-#        truncated and master-bin.000003 will be removed.
+#    5 - Restart normally to print post recovery status.
 #
 # ==== References ====
 #
@@ -35,41 +33,46 @@
 --source include/have_debug_sync.inc
 --source include/have_binlog_format_row.inc
 
-SET @old_max_binlog_size= @@GLOBAL.max_binlog_size;
-SET GLOBAL max_binlog_size= 4096;
+--let $old_max_binlog_size= `select @@global.max_binlog_size`
 call mtr.add_suppression("Can't init tc log");
 call mtr.add_suppression("Aborting");
+call mtr.add_suppression("tc-heuristic-recover: the last binlog file was gracefully closed");
+--let $MYSQLD_DATADIR= `SELECT @@datadir`
 
 CREATE TABLE t1 (a INT PRIMARY KEY, b MEDIUMTEXT) ENGINE=Innodb;
 CREATE TABLE t2 (a INT PRIMARY KEY, b MEDIUMTEXT) ENGINE=rocksdb;
 
---echo # Case A: neither engine committed => rollback & binlog truncate
+--let $case = A: neither engine committed => rollback & binlog truncate
 # Hold off engine commits after write to binlog and its rotation.
 # The transaction is killed along with the server after that.
---let $debug_sync_action = "commit_after_release_LOCK_log SIGNAL con1_ready WAIT_FOR _never_to_arrive"
+--let $kill_server=1
+--let $debug_sync_action = "commit_after_release_LOCK_log SIGNAL con1_ready WAIT_FOR signal_no_signal"
 --let $restart_options = --tc-heuristic-recover=BINLOG_TRUNCATE
---source binlog_truncate_multi_engine.inc
+--let $test_outcome= 1 row should be present in both tables; binlog is truncated; number of binlogs at reconnect 4
+  --source binlog_truncate_multi_engine.inc
+--echo Proof of the truncated binlog file is readable (two transactions must be seen):
+--let $MYSQLD_DATADIR = `select @@datadir`
+--exec $MYSQL_BINLOG --short-form $MYSQLD_DATADIR/master-bin.000002
 
---connection default
---let $test_outcome= *** Zero rows should be present in both tables; binlog is truncated.
-
---echo # Case B: one engine has committed its transaction branch
+--let $case = B: one engine has committed its transaction branch
 # Hold off after one engine has committed.
---let $debug_sync_action = "commit_after_run_commit_ordered SIGNAL con1_ready WAIT_FOR _never_to_arrive"
---let $restart_options = --tc-heuristic-recover=BINLOG_TRUNCATE,--debug-dbug=d,binlog_truncate_partial_commit
---let $test_outcome= *** 1 row should be present in both tables; no binlog truncation.
---source binlog_truncate_multi_engine.inc
+--let $kill_server=1
+--let $debug_sync_action = "commit_after_run_commit_ordered SIGNAL con1_ready WAIT_FOR signal_no_signal"
+--let $restart_options = --tc-heuristic-recover=BINLOG_TRUNCATE --debug-dbug=d,binlog_truncate_partial_commit
+--let $test_outcome= 2 rows should be present in both tables; no binlog truncation; one extra binlog file compare with A; number of binlogs at reconnect 5
+  --source binlog_truncate_multi_engine.inc
 
---echo # Case C: both engines have committed its transaction branch
-# Hold off after both engines have committed.
---let $debug_sync_action = "commit_one_phase_2_ends SIGNAL con1_ready WAIT_FOR _never_to_arrive"
+--let $case = C: both engines have committed its transaction branch
+# Hold off after both engines have committed. The server is shut down.
+--let $kill_server=0
 --let $restart_options = --tc-heuristic-recover=BINLOG_TRUNCATE
---let $test_outcome= 1 row should be present in both tables; no binlog truncation.
---source binlog_truncate_multi_engine.inc
+--let $test_outcome= 2 rows should be present in both tables; no binlog truncation; the same # of binlog files as in B; number of binlogs at reconnect 5
+  --source binlog_truncate_multi_engine.inc
 
 
 --echo # Cleanup
 DROP TABLE t1, t2;
-SELECT @@GLOBAL.gtid_binlog_state;
+--replace_result $old_max_binlog_size VALUE_AT_START
+--eval SET @@global.max_binlog_size = $old_max_binlog_size
 
 --echo # End of the tests

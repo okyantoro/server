@@ -29,7 +29,7 @@
 --source include/have_debug_sync.inc
 --source include/have_binlog_format_row.inc
 
-SET @old_max_binlog_size= @@global.max_binlog_size;
+--let $old_max_binlog_size= `select @@global.max_binlog_size`
 SET GLOBAL max_binlog_size= 4096;
 
 call mtr.add_suppression("Table '.*tm' is marked as crashed and should be repaired");
@@ -39,6 +39,9 @@ call mtr.add_suppression("Recovering table: '.*tm'");
 call mtr.add_suppression("tc-heuristic-recover cannot trim the binary log to");
 call mtr.add_suppression("Can't init tc log");
 call mtr.add_suppression("Aborting");
+call mtr.add_suppression("Found 1 prepared transactions");
+call mtr.add_suppression("mysqld: Table.*tm.*is marked as crashed");
+call mtr.add_suppression("Checking table.*tm");
 
 RESET MASTER;
 
@@ -55,7 +58,7 @@ SET DEBUG_SYNC= "commit_before_get_LOCK_commit_ordered SIGNAL con1_ready WAIT_FO
 
 --connection master2
 SET DEBUG_SYNC= "now WAIT_FOR con1_ready";
---send INSERT INTO tm VALUES (30);
+--send INSERT INTO tm VALUES (30)
 
 --connection default
 --write_file $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
@@ -66,13 +69,17 @@ EOF
 --source include/wait_until_disconnected.inc
 
 #
-# Server restart
+# Server restarts
 #
---append_file $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
-restart: --tc-heuristic-recover=BINLOG_TRUNCATE --debug-dbug=d,simulate_innodb_forget_commit_pos
-EOF
---source include/wait_until_disconnected.inc
+--echo # BINLOG TRUNCATE recovery restart
+--error 1
+--exec $MYSQLD_LAST_CMD  --tc-heuristic-recover=BINLOG_TRUNCATE >> $MYSQLTEST_VARDIR/log/mysqld.1.err 2>&1
 
+--echo # ROLLLBACK heuristic recovery restart
+--error 1
+--exec $MYSQLD_LAST_CMD  --tc-heuristic-recover=ROLLBACK >> $MYSQLTEST_VARDIR/log/mysqld.1.err 2>&1
+
+--echo # NORMAL restart
 --append_file $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
 restart:
 EOF
@@ -92,15 +99,18 @@ if(!$log_error_)
 --let SEARCH_FILE=$log_error_
 --let SEARCH_RANGE=-50000
 --let SEARCH_PATTERN=tc-heuristic-recover cannot trim the binary log
+--replace_regex /FOUND [0-9]+/FOUND #/
 --source include/search_pattern_in_file.inc
 
---echo "Zero rows should be present in 'ti' table."
-SELECT COUNT(*) FROM ti;
---echo "One or zero row must be present in 'tm' table."
---replace_regex /Table '.*tm/Table 'tm/
+SELECT COUNT(*) = 0 as 'True' FROM ti;
+# myisam table may require repair (which is not tested here)
 --disable_warnings
 SELECT COUNT(*) <= 1 FROM tm;
 --enable_warnings
 SELECT @@GLOBAL.gtid_current_pos;
 
+--echo # Cleanup
+--replace_result $old_max_binlog_size VALUE_AT_START
+--eval SET @@global.max_binlog_size = $old_max_binlog_size
 DROP TABLE ti, tm;
+--echo End of test

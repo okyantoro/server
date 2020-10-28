@@ -4401,5 +4401,6 @@ int del_global_table_stat(THD *thd, LEX_STRING *db, LEX_STRING *table);
 char *xid_to_str(char *buf, const XID &xid);
 #endif // !DBUG_OFF
 
-uint ha_count_rw_all(THD *thd, Ha_trx_info **ptr_ha_info, bool count_through);
+uint ha_count_rw(THD *thd, Ha_trx_info **ptr_ha_info, bool count_through,
+                 bool all);
 #endif /* HANDLER_INCLUDED */

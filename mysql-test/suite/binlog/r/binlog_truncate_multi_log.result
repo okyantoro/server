@@ -36,3 +36,4 @@ DROP TABLE t1;
 SELECT @@GLOBAL.gtid_binlog_state;
 @@GLOBAL.gtid_binlog_state
 0-1-2
+# End of the tests

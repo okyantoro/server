@@ -801,7 +801,8 @@ public:
   int set_purge_index_file_name(const char *base_file_name);
   int open_purge_index_file(bool destroy);
   bool truncate_and_remove_binlogs(const char *truncate_file,
-                                   my_off_t truncate_pos);
+                                   my_off_t truncate_pos,
+                                   enum_binlog_checksum_alg cs_alg);
   int get_binlog_checkpoint_file(char* checkpoint_file,
                                  Format_description_log_event **out_fdle);
   bool is_inited_purge_index_file();

@@ -1253,11 +1253,13 @@ int ha_prepare(THD *thd)
   read-write recoverable transaction participants optionally limited to two.
   Also optionally returns the last found rw ha_info through the 2nd argument.
 */
-uint ha_count_rw_all(THD *thd, Ha_trx_info **ptr_ha_info, bool count_through)
+uint ha_count_rw(THD *thd, Ha_trx_info **ptr_ha_info,
+                 bool count_through, bool all)
 {
   unsigned rw_ha_count= 0;
+  THD_TRANS *trans=all ? &thd->transaction.all : &thd->transaction.stmt;
 
-  for (Ha_trx_info * ha_info= thd->transaction.all.ha_list; ha_info;
+  for (Ha_trx_info * ha_info= trans->ha_list; ha_info;
        ha_info= ha_info->next())
   {
     if (ha_info->is_trx_read_write() && ha_info->ht()->recover)

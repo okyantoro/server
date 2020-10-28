@@ -5892,6 +5892,7 @@ MYSQL_BIN_LOG::write_gtid_event(THD *thd, bool standalone,
   uint32 local_server_id;
   uint64 seq_no;
   int err;
+
   DBUG_ENTER("write_gtid_event");
   DBUG_PRINT("enter", ("standalone: %d", standalone));
 
@@ -8100,6 +8101,8 @@ MYSQL_BIN_LOG::write_transaction_or_stmt(group_commit_entry *entry,
   binlog_cache_mngr *mngr= entry->cache_mngr;
   DBUG_ENTER("MYSQL_BIN_LOG::write_transaction_or_stmt");
 
+  DBUG_ASSERT(entry->all == entry->thd->in_multi_stmt_transaction_mode());
+
   if (write_gtid_event(entry->thd, false, entry->using_trx_cache, commit_id))
     DBUG_RETURN(ER_ERROR_ON_WRITE);
 
@@ -9618,7 +9621,8 @@ err:
 
 */
 bool MYSQL_BIN_LOG::truncate_and_remove_binlogs(const char *truncate_file,
-                                                my_off_t truncate_pos)
+                                                my_off_t truncate_pos,
+                                                enum_binlog_checksum_alg cs_alg)
 {
   int error= 0;
 #ifdef HAVE_REPLICATION
@@ -9745,7 +9749,7 @@ bool MYSQL_BIN_LOG::truncate_and_remove_binlogs(const char *truncate_file,
       truncated.
     */
     Stop_log_event se;
-    se.checksum_alg= (enum_binlog_checksum_alg) binlog_checksum_options;
+    se.checksum_alg= cs_alg;
     if ((error= write_event(&se, &cache)))
     {
       sql_print_error("tc-heuristic-recover: Failed to write stop event to "
@@ -9753,6 +9757,7 @@ bool MYSQL_BIN_LOG::truncate_and_remove_binlogs(const char *truncate_file,
                       (cache.error == -1) ? my_errno : error);
       goto end;
     }
+    clear_inuse_flag_when_closing(cache.file);
     if ((error= flush_io_cache(&cache)) ||
         (error= mysql_file_sync(file, MYF(MY_WME|MY_SYNC_FILESIZE))))
     {
@@ -9914,10 +9919,12 @@ int TC_LOG_BINLOG::heuristic_binlog_rollback(HASH *xids)
   Format_description_log_event *ptr_fdle= NULL;
   bool is_safe= true;
   my_off_t tmp_truncate_pos= 0, tmp_pos= 0;
-  rpl_gtid last_gtid;
+  rpl_gtid last_gtid, truncate_gtid;
   bool last_gtid_standalone= false;
   bool last_gtid_valid= false;
   uint last_gtid_engines= 0;
+  ulonglong gtids_to_truncate= 0;
+  enum_binlog_checksum_alg cs_alg; // for Stop_event
 
   if ((error= get_binlog_checkpoint_file(checkpoint_file, &ptr_fdle)))
   {
@@ -9946,8 +9953,8 @@ int TC_LOG_BINLOG::heuristic_binlog_rollback(HASH *xids)
         FALSE))
   {
     error= 1;
-    sql_print_error("tc-heuristic-recover: Failed to open the binlog:%s for "
-                    "recovery. Error:%s", log_info.log_file_name, errmsg);
+    sql_print_error("tc-heuristic-recover: Failed to open the binlog file %s "
+                    "for recovery. Error:%s", log_info.log_file_name, errmsg);
     goto end;
   }
 
@@ -9986,10 +9993,14 @@ int TC_LOG_BINLOG::heuristic_binlog_rollback(HASH *xids)
           // either to/as 0 for to-commit mark, or non-zero for rollback
           if (member->in_engine_prepare > last_gtid_engines)
           {
+            char buf[21];
+            longlong10_to_str(truncate_gtid.seq_no, buf, 10);
             sql_print_error("Error to recovery multi-engine transaction: "
-                            "the number of engines %du exceeds the "
-                            "respective number %du in its GTID event",
-                            member->in_engine_prepare, last_gtid_engines);
+                            "the number of engines prepared %u exceeds the "
+                            "respective number %u in its GTID %u-%u-%s",
+                            member->in_engine_prepare, last_gtid_engines,
+                            log_info.log_file_name, tmp_truncate_pos,
+                            last_gtid.domain_id, last_gtid.server_id, buf);
             error= 1;
             goto end;
           }
@@ -10002,6 +10013,9 @@ int TC_LOG_BINLOG::heuristic_binlog_rollback(HASH *xids)
             DBUG_ASSERT(binlog_truncate_pos == 0);
 
             binlog_truncate_pos= tmp_truncate_pos; // ascertained now
+            strmake_buf(binlog_truncate_file_name, log_info.log_file_name);
+            truncate_gtid= last_gtid;
+            cs_alg= ptr_fdle->checksum_alg;
           }
         }
       }
@@ -10031,17 +10045,14 @@ int TC_LOG_BINLOG::heuristic_binlog_rollback(HASH *xids)
           ((gev->flags2 & Gtid_log_event::FL_STANDALONE) ? true : false);
         last_gtid_valid= true;
         last_gtid_engines= gev->extra_engines + 1;
-        if (gev->flags2 & Gtid_log_event::FL_TRANSACTIONAL &&
-            binlog_truncate_pos == 0)
+        if (gev->flags2 & Gtid_log_event::FL_TRANSACTIONAL)
         {
-          strmake_buf(binlog_truncate_file_name, log_info.log_file_name);
-          tmp_truncate_pos= tmp_pos;   // yet only a candidate
+          if (binlog_truncate_pos == 0)
+            tmp_truncate_pos= tmp_pos;   // yet only a candidate
+          gtids_to_truncate++;
         }
-        else
-        {
-          if (binlog_truncate_pos > 0)
-            is_safe= false;
-        }
+        else if (binlog_truncate_pos > 0)
+          is_safe= false;
       }
       break;
       case START_ENCRYPTION_EVENT:
@@ -10112,37 +10123,42 @@ int TC_LOG_BINLOG::heuristic_binlog_rollback(HASH *xids)
     }
   } //end of for(;;)
 
-  /* complete with xids transactions in engines (regadless of is_safe)  */
-  (void) ha_recover_binlog_truncate_complete(xids);
+  /* complete with xids transactions in engines */
+  if (is_safe)
+    (void) ha_recover_binlog_truncate_complete(xids);
 
   if (binlog_truncate_pos == 0)
     goto end; // Nothing to truncate
   else
   {
-    DBUG_ASSERT(binlog_truncate_pos > 0);
 
+
+    char buf[21];
+    longlong10_to_str(truncate_gtid.seq_no, buf, 10);
     sql_print_information("tc-heuristic-recover: Binary log to be truncated "
-                          "File:%s Pos:%llu.", binlog_truncate_file_name,
-                          binlog_truncate_pos);
+                          "file:%s pos:%llu at GTID %u-%u-%s",
+                          binlog_truncate_file_name, binlog_truncate_pos,
+                          truncate_gtid.domain_id, truncate_gtid.server_id, buf);
   }
-
   if (is_safe)
   {
     if ((error= truncate_and_remove_binlogs(binlog_truncate_file_name,
-                                            binlog_truncate_pos)))
+                                            binlog_truncate_pos,
+                                            cs_alg)))
     {
       sql_print_error("tc-heuristic-recover: Failed to trim the binary log to "
-                      "File:%s Pos:%llu.", binlog_truncate_file_name,
+                      "file:%s pos:%llu.", binlog_truncate_file_name,
                       binlog_truncate_pos);
       goto end;
     }
   }
   else
   {
-    sql_print_warning("tc-heuristic-recover cannot trim the binary log to "
-                      "File:%s Pos:%llu as unsafe statements (non-trans/DDL) "
-                      "statements are found beyond the truncation position.",
-                      binlog_truncate_file_name, binlog_truncate_pos);
+    sql_print_error("tc-heuristic-recover cannot trim the binary log to "
+                    "file:%s pos:%llu as unsafe statements (non-trans/DDL) "
+                    "statements are found beyond the truncation position; "
+                    "transactions in doubt left intact",
+                    binlog_truncate_file_name, binlog_truncate_pos);
   }
   if ((error= write_state_to_file()))
   {
@@ -10157,6 +10173,8 @@ end:
     end_io_cache(&log);
     mysql_file_close(file, MYF(MY_WME));
   }
+  if (ev != ptr_fdle)
+    delete ev;
   delete ptr_fdle;
 #endif
 

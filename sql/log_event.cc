@@ -7580,10 +7580,11 @@ Gtid_log_event::Gtid_log_event(THD *thd_arg, uint64 seq_no_arg,
     seq_no(seq_no_arg), commit_id(commit_id_arg), domain_id(domain_id_arg),
     flags2((standalone ? FL_STANDALONE : 0) |
            (commit_id_arg ? FL_GROUP_COMMIT_ID : 0)),
-    flags_extra(0)
+    flags_extra(0), extra_engines(0)
 {
   cache_type= Log_event::EVENT_NO_CACHE;
   bool is_tmp_table= thd_arg->lex->stmt_accessed_temp_table();
+
   if (thd_arg->transaction.stmt.trans_did_wait() ||
       thd_arg->transaction.all.trans_did_wait())flags2|= FL_WAITED;
   if (thd_arg->transaction.stmt.trans_did_ddl() ||
@@ -7598,9 +7599,16 @@ Gtid_log_event::Gtid_log_event(THD *thd_arg, uint64 seq_no_arg,
   /* Preserve any DDL or WAITED flag in the slave's binlog. */
   if (thd_arg->rgi_slave)
     flags2|= (thd_arg->rgi_slave->gtid_ev_flags2 & (FL_DDL|FL_WAITED));
-  /* below minus 1 counts one recoverable default engine which binlog is not */
-  if ((extra_engines= (min<uint>(2, ha_count_rw_all(thd, NULL, true)) - 1) > 0))
+  /* count non-zero extra recoverable engines. total = extra + 1 */
+  if (is_transactional &&
+      (extra_engines=
+       max<uint>(1,
+                 ha_count_rw(thd, NULL, true,
+                             thd_arg->in_multi_stmt_transaction_mode())) - 1)
+      > 0)
+  {
     flags_extra|= FL_EXTRA_MULTI_ENGINE;
+  }
 }
 
 

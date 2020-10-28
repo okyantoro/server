@@ -85,3 +85,4 @@ SELECT @@GLOBAL.gtid_current_pos;
 DROP TABLE t1;
 SELECT @@GLOBAL.gtid_binlog_state;
 
+--echo # End of the tests
